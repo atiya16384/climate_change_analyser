@@ -9,76 +9,104 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 
 app = Flask(__name__)
-# Load the data
-temperature_read_csv = pd.read_csv('GlobalLandTemperaturesByCity.csv')
+# first we want to load and preprocess the data for C02_emissions.csv and GlobalLandTemperaturesByCountry.csv files
 
-# we convert the 'dt' time to datetime format so that we can use it for time series analysis
-temperature_read_csv['dt'] = pd.to_datetime(temperature_read_csv['dt'])
+def load_and_process_data():
+    # we do this first for the co2 emissions data
+    temperature_read_csv = pd.read_csv('GlobalLandTemperaturesByCity.csv')
+     # we convert the 'dt' time to datetime format so that we can use it for time series analysis
+    temperature_read_csv['dt'] = pd.to_datetime(temperature_read_csv['dt'])
+    # we extract the year out from the data column
+    temperature_read_csv['Year'] = temperature_read_csv['dt'].dt.year
+    # we group each of the years together and calculate the respective means
+    global_temp = temperature_read_csv.groupby('Year')['AverageTemperature'].mean()
+    # we reset the index so that we can use the year as a column
+    global_temp = global_temp.reset_index()
+    # we remove the rows with missing values
+    global_temp = global_temp.dropna()
 
-# we extract the year out from the data column
-temperature_read_csv['year'] = temperature_read_csv['dt'].dt.year
+    # we do this for the co2 emissions data
+    c02_data = pd.read_csv('CO2_emission.csv')
+    co2_data_melted = pd.melt(c02_data, 
+                          id_vars=['Country Name', 'country_code', 'Region', 'Indicator Name'],
+                          var_name='Year', 
+                          value_name='CO2_Emissions')
+    # As we have multiple types of indicators, we only want to choose 1 so that we don't use mix together different types of data
+    co2_data_melted = co2_data_melted[co2_data_melted['Indicator Name'] == 'CO2 emissions (metric tons per capita)']
 
-# we group each of the years together and calculate the respective means
-global_temp = temperature_read_csv.groupby('year')['AverageTemperature'].mean()
+    # we convert the 'Year' column to integer, as the current type of the data is string
+    co2_data_melted['Year'] = pd.to_numeric(co2_data_melted['Year'])
 
-# we reset the index so that we can use the year as a column
-global_temp = global_temp.reset_index()
+    # first drop any missing values in C02 emissions
+    co2_data_melted = co2_data_melted.dropna(subset = ['CO2_Emissions'])
 
-# we remove the rows with missing values
-global_temp = global_temp.dropna()
+    # we group the data by year and calculate the average CO2 emissions for each year
+    co2_data_grouped = co2_data_melted.groupby('Year')['CO2_Emissions'].mean().reset_index()
 
-sns.set(style="whitegrid")
+    return global_temp, co2_data_grouped
 
-# Set the figure size
-plt.figure(figsize=(14, 8))
-plt.title('Global Average Temperature Over Time')
-plt.xlabel('Year')
-plt.ylabel('Average Temperature')
-plt.plot(global_temp['year'], global_temp['AverageTemperature'], color='blue', marker='o')
-plt.show()
 
-# we prepare the data for linear regression
-X = global_temp['year'].values.reshape(-1, 1)
-y = global_temp['AverageTemperature'].values
-
-# we split the data into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
-
-# create a linear regression model
-model = LinearRegression()
-model.fit(X_train, y_train)
-
-# predict temperature anomalies for future years
-# we conver the range of years to a nump array before we can use it for prediction- that will get rid of possible errors/warnings in console.
-future_years = pd.DataFrame(np.arange(2012, 2041), columns=['year'])  # 'year' should be 'Year' for consistency
-future_predictions = model.predict(future_years)
-
-# helper function to convert plots to base64 PNGs
-def plot_to_img_tag(plt):
+# Helper function to create base64-encoded images for plots
+def plot_to_base64(plt):
     img = io.BytesIO()
     plt.savefig(img, format='png')
     img.seek(0)
     return base64.b64encode(img.getvalue()).decode()
 
-# define the home route for the app
+
+# Helper function to perform linear regression and predict future values
+
+def perform_regression_and_predict(df, target_col, year_col='Year', start_year = 2021, end_year = 2050):
+    # Split the data into training and testing sets
+    X= df[year_col].values.reshape(-1,1)
+    y = df[target_col].values
+
+    # fit the linear regression model
+    model = LinearRegression()
+    model.fit(X, y)
+
+    # predict future values
+    future_years = np.arange(start_year, end_year).reshape(-1,1)
+    future_predictions = model.predict(future_years)
+    
+    return future_years, future_predictions
+
+# flask route for the home page
 @app.route('/')
 def home():
-    # plot global average temperature over time
-    plt.figure(figsize=(10, 5))
-    sns.lineplot(global_temp['year'], global_temp['AverageTemperature'], label='Historical', color='blue')
-    sns.lineplot(x=future_years['year'], y=future_predictions, label= 'Predicted',linestyle='--') 
+    co2_data, temp_data = load_and_process_data()
 
-    # plot the future predictions
-    plt.title('Global Average Temperature Over Time')
+    # we use linear regression for both of them to predict data
+
+    # linear regression for c02 emissions
+    co2_future_years, co2_future_predictions = perform_regression_and_predict(co2_data, 'CO2_Emissions')
+
+    # linear regression for temperature data
+    temp_future_years, temp_future_predictions = perform_regression_and_predict(temp_data, 'AverageTemperature')
+
+    # Create CO2 emissions plot with predictions
+    plt.figure(figsize=(10,6))
+    plt.plot(co2_data['Year'], co2_data['CO2_Emissions'], label='CO2 Emissions')
+    plt.plot(co2_future_years, co2_future_predictions, label='Future Predictions')
     plt.xlabel('Year')
-    plt.ylabel('Average Temperature (°C)')
-    plt.show()
+    plt.ylabel('CO2 Emissions (metric tons per capita)')
+    plt.title('CO2 Emissions Over Time')
+    plt.legend()
+    co2_plot = plot_to_base64(plt)
 
-    # save the plot to a base64-encoded image to embed in the HTML
-    img_tag = plot_to_img_tag(plt)
-    # Render the HTML template with the plot embedded
-    return render_template('index.html', plot_img=img_tag)
+
+    # Create temperature plot with predictions
+    plt.figure(figsize=(10,6))
+    plt.plot(temp_data['Year'], temp_data['AverageTemperature'], label='Average Temperature')
+    plt.plot(temp_future_years, temp_future_predictions, label='Future Predictions')
+    plt.xlabel('Year')
+    plt.ylabel('Average Temperature')
+    plt.title('Global Average Temperature Over Time')
+    plt.legend()
+    temp_plot = plot_to_base64(plt)
+
+    return render_template('index.html', co2_plot=co2_plot, temp_plot=temp_plot)
+
 
 if __name__ == '__main__':
     app.run(debug=True)
-    
